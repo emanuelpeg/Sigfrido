@@ -1,6 +1,7 @@
 mod gossip;
 mod message;
 mod node;
+mod membership;
 
 use gossip::start_gossip;
 use node::Node;

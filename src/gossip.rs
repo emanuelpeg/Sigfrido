@@ -4,9 +4,13 @@ use tokio::{
     time::{sleep, Duration},
 };
 
+use std::time::Instant;
+
 use crate::{
     message::GossipMessage,
+    message::NodeState,
     node::Node,
+    membership::Member
 };
 
 pub async fn start_gossip(node: Node) {
@@ -17,7 +21,8 @@ pub async fn start_gossip(node: Node) {
     println!("Node {} listening on {}", node.id, node.address);
 
     let socket = std::sync::Arc::new(socket);
-
+    let receiver_membership = node.membership.clone();
+   
     // Receiver
     {
         let socket = socket.clone();
@@ -31,38 +36,94 @@ pub async fn start_gossip(node: Node) {
                     .expect("Failed to receive");
 
                 let msg: GossipMessage =
-                    serde_json::from_slice(&buf[..len])
-                        .expect("Invalid message");
+                    serde_json::from_slice(&buf[..len]).unwrap();
+
+                let mut membership =
+                    receiver_membership.lock().await;
+
+                for state in msg.states {
+
+                    match membership.get(&state.node_id) {
+
+                        Some(member)
+                            if member.heartbeat >= state.heartbeat =>
+                        {
+                            // ignorar estado viejo
+                        }
+
+                        _ => {
+
+                            membership.insert(
+                                state.node_id.clone(),
+                                Member {
+                                    node_id: state.node_id.clone(),
+                                    heartbeat: state.heartbeat,
+                                    last_seen: Instant::now(),
+                                },
+                            );
+                            
+                        }
+                    }
+                }
+
+                for member in membership.values() {
+                    println!(
+                        "Node {} -> heartbeat={}",
+                        member.node_id,
+                        member.heartbeat
+                    );
+                }
 
                 println!(
-                    "Received gossip from {} => {:?}",
-                    addr,
-                    msg
+                    "Received gossip from {}",
+                    addr
                 );
             }
         });
     }
 
     // Sender
-    let mut heartbeat = 0u64;
-
     loop {
-        heartbeat += 1;
 
-        let peers = node.peers.lock().await;
+        {
+            let mut membership = node.membership.lock().await;
 
-        if let Some(peer) = peers.choose(&mut rand::rng()) {
-            let msg = GossipMessage {
-                node_id: node.id.clone(),
-                heartbeat,
+            let myself = membership
+                .get_mut(&node.id)
+                .unwrap();
+
+            myself.heartbeat += 1;
+            myself.last_seen = Instant::now();
+
+        } // <- acá se libera el lock
+
+        let peer = {
+            let peers = node.peers.lock().await;
+            peers.choose(&mut rand::rng()).cloned()
+        };
+
+        if let Some(peer) = peer {
+
+            let states = {
+                let membership = node.membership.lock().await;
+
+                membership.values()
+                    .map(|m| NodeState {
+                        node_id: m.node_id.clone(),
+                        heartbeat: m.heartbeat,
+                    })
+                    .collect::<Vec<_>>()
             };
 
-            let bytes = serde_json::to_vec(&msg)
-                .expect("Serialization failed");
+            let msg = GossipMessage {
+                states
+            };
 
-            socket.send_to(&bytes, peer)
+            let bytes = serde_json::to_vec(&msg).unwrap();
+
+            socket.send_to(&bytes, &peer)
                 .await
-                .expect("Failed to send");
+                .unwrap();
 
             println!(
                 "Sent gossip to {} => {:?}",
