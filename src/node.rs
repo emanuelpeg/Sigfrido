@@ -6,7 +6,9 @@ use std::{
 use tokio::sync::Mutex;
 use uuid::Uuid;
 use std::time::Instant;
-use crate::membership::Member;
+use crate::membership::{
+    Member, MemberStatus
+};
 
 #[derive(Debug)]
 pub struct Node {
@@ -30,6 +32,7 @@ impl Node {
                 node_id: id.clone(),
                 heartbeat: 0,
                 last_seen: Instant::now(),
+                status: MemberStatus::Alive,
             },
         );
 

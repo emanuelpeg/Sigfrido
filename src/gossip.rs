@@ -10,7 +10,10 @@ use crate::{
     message::GossipMessage,
     message::NodeState,
     node::Node,
-    membership::Member
+    membership::{
+        MemberStatus,
+        Member
+    }
 };
 
 pub async fn start_gossip(node: Node) {
@@ -23,6 +26,8 @@ pub async fn start_gossip(node: Node) {
     let socket = std::sync::Arc::new(socket);
     let receiver_membership = node.membership.clone();
    
+    let detector_membership = node.membership.clone();
+    
     // Receiver
     {
         let socket = socket.clone();
@@ -39,18 +44,19 @@ pub async fn start_gossip(node: Node) {
                     serde_json::from_slice(&buf[..len]).unwrap();
 
                 let mut membership =
-                    receiver_membership.lock().await;
+                    node.membership.lock().await;
 
                 for state in msg.states {
 
-                    match membership.get(&state.node_id) {
+                    match membership.get_mut(&state.node_id) {
 
-                        Some(member)
-                            if member.heartbeat >= state.heartbeat =>
-                        {
-                            // ignorar estado viejo
+                        Some(member) => {
+                            if state.heartbeat > member.heartbeat {
+                                member.last_seen = Instant::now();
+                            }
+                            member.heartbeat = state.heartbeat;
+                            member.status = state.status;
                         }
-
                         _ => {
 
                             membership.insert(
@@ -59,19 +65,12 @@ pub async fn start_gossip(node: Node) {
                                     node_id: state.node_id.clone(),
                                     heartbeat: state.heartbeat,
                                     last_seen: Instant::now(),
+                                    status: MemberStatus::Alive,
                                 },
                             );
                             
                         }
                     }
-                }
-
-                for member in membership.values() {
-                    println!(
-                        "Node {} -> heartbeat={}",
-                        member.node_id,
-                        member.heartbeat
-                    );
                 }
 
                 println!(
@@ -82,11 +81,53 @@ pub async fn start_gossip(node: Node) {
         });
     }
 
+
+    tokio::spawn(async move {
+
+        loop {
+
+            {
+                let mut membership =
+                    detector_membership.lock().await;
+
+                for member in membership.values_mut() {
+
+                    let elapsed =
+                        member.last_seen.elapsed();
+
+                    if elapsed.as_secs() > 5 {
+                        member.status = MemberStatus::Suspect;
+                    }
+
+                    if elapsed.as_secs() > 15 {
+                        member.status = MemberStatus::Dead;
+                    }
+
+                }
+
+                for member in membership.values() {
+                    println!(
+                        "Node {} -> heartbeat={} status={} last_seen={} seconds ago",
+                        member.node_id,
+                        member.heartbeat,
+                        member.status, 
+                        member.last_seen.elapsed().as_secs()
+                    );
+                }
+
+            }
+
+            sleep(Duration::from_secs(1)).await;
+
+        }
+
+    });
+
     // Sender
     loop {
 
         {
-            let mut membership = node.membership.lock().await;
+            let mut membership = receiver_membership.lock().await;
 
             let myself = membership
                 .get_mut(&node.id)
@@ -105,12 +146,13 @@ pub async fn start_gossip(node: Node) {
         if let Some(peer) = peer {
 
             let states = {
-                let membership = node.membership.lock().await;
+                let membership = receiver_membership.lock().await;
 
                 membership.values()
                     .map(|m| NodeState {
                         node_id: m.node_id.clone(),
                         heartbeat: m.heartbeat,
+                        status: m.status.clone(),
                     })
                     .collect::<Vec<_>>()
             };
