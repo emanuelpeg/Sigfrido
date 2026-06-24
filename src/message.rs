@@ -4,6 +4,7 @@ use crate::membership::MemberStatus;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NodeState {
     pub node_id: String,
+    pub address: String,
     pub heartbeat: u64,
     pub status: MemberStatus,
 }

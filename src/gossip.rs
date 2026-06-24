@@ -1,8 +1,9 @@
-use rand::seq::IndexedRandom;
+use rand::seq::IteratorRandom;
 use tokio::{
     net::UdpSocket,
     time::{sleep, Duration},
 };
+use tracing::info;
 
 use std::time::Instant;
 
@@ -21,13 +22,14 @@ pub async fn start_gossip(node: Node) {
         .await
         .expect("Failed to bind UDP socket");
 
-    println!("Node {} listening on {}", node.id, node.address);
+    info!("Node {} listening on {}", node.id, node.address);
 
     let socket = std::sync::Arc::new(socket);
     let receiver_membership = node.membership.clone();
    
     let detector_membership = node.membership.clone();
-    
+    let local_address = node.address.clone();
+    let receiver_peers = node.peers.clone();
     // Receiver
     {
         let socket = socket.clone();
@@ -48,14 +50,30 @@ pub async fn start_gossip(node: Node) {
 
                 for state in msg.states {
 
+                    if state.address != local_address {
+
+                        let mut peers =
+                            receiver_peers.lock().await;
+
+                        peers.insert(
+                            state.address.clone()
+                        );
+                    }
+
                     match membership.get_mut(&state.node_id) {
 
                         Some(member) => {
-                            if state.heartbeat > member.heartbeat {
+
+                            if should_update(
+                                member.heartbeat,
+                                &member.status,
+                                state.heartbeat,
+                                &state.status,
+                            ) {
+                                member.heartbeat = state.heartbeat;
+                                member.status = state.status.clone();
                                 member.last_seen = Instant::now();
                             }
-                            member.heartbeat = state.heartbeat;
-                            member.status = state.status;
                         }
                         _ => {
 
@@ -63,17 +81,17 @@ pub async fn start_gossip(node: Node) {
                                 state.node_id.clone(),
                                 Member {
                                     node_id: state.node_id.clone(),
+                                    address: state.address.clone(),
                                     heartbeat: state.heartbeat,
                                     last_seen: Instant::now(),
                                     status: MemberStatus::Alive,
                                 },
-                            );
-                            
+                            );                            
                         }
                     }
                 }
 
-                println!(
+                info!(
                     "Received gossip from {}",
                     addr
                 );
@@ -106,9 +124,9 @@ pub async fn start_gossip(node: Node) {
                 }
 
                 for member in membership.values() {
-                    println!(
+                    info!(
                         "Node {} -> heartbeat={} status={} last_seen={} seconds ago",
-                        member.node_id,
+                        member.address,
                         member.heartbeat,
                         member.status, 
                         member.last_seen.elapsed().as_secs()
@@ -140,7 +158,7 @@ pub async fn start_gossip(node: Node) {
 
         let peer = {
             let peers = node.peers.lock().await;
-            peers.choose(&mut rand::rng()).cloned()
+            peers.iter().choose(&mut rand::rng()).cloned()
         };
 
         if let Some(peer) = peer {
@@ -151,6 +169,7 @@ pub async fn start_gossip(node: Node) {
                 membership.values()
                     .map(|m| NodeState {
                         node_id: m.node_id.clone(),
+                        address: m.address.clone(),
                         heartbeat: m.heartbeat,
                         status: m.status.clone(),
                     })
@@ -167,7 +186,7 @@ pub async fn start_gossip(node: Node) {
                 .await
                 .unwrap();
 
-            println!(
+            info!(
                 "Sent gossip to {} => {:?}",
                 peer,
                 msg
@@ -176,4 +195,23 @@ pub async fn start_gossip(node: Node) {
 
         sleep(Duration::from_secs(2)).await;
     }
+}
+
+fn should_update(
+    current_heartbeat: u64,
+    current_status: &MemberStatus,
+    incoming_heartbeat: u64,
+    incoming_status: &MemberStatus,
+) -> bool {
+
+    if incoming_heartbeat > current_heartbeat {
+        return true;
+    }
+
+    if incoming_heartbeat < current_heartbeat {
+        return false;
+    }
+
+    incoming_status.priority()
+        > current_status.priority()
 }

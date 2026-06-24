@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
 };
 
@@ -15,13 +15,13 @@ pub struct Node {
     pub id: String,
     pub address: String,
 
-    pub peers: Arc<Mutex<Vec<String>>>,
+    pub peers: Arc<Mutex<HashSet<String>>>,
 
     pub membership: Arc<Mutex<HashMap<String, Member>>>,
 }
 
 impl Node {
-    pub fn new(address: String, peers: Vec<String>) -> Self {
+    pub fn new(address: String, peers: HashSet<String>) -> Self {
         let id = Uuid::new_v4().to_string();
 
         let mut membership = HashMap::new();
@@ -30,6 +30,7 @@ impl Node {
             id.clone(),
             Member {
                 node_id: id.clone(),
+                address: address.clone(),
                 heartbeat: 0,
                 last_seen: Instant::now(),
                 status: MemberStatus::Alive,
