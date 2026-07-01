@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use crate::{
     message::GossipMessage,
+    message::Message,
     message::NodeState,
     node::Node,
     membership::{
@@ -42,59 +43,76 @@ pub async fn start_gossip(node: Node) {
                     .await
                     .expect("Failed to receive");
 
-                let msg: GossipMessage =
+                let message: Message =
                     serde_json::from_slice(&buf[..len]).unwrap();
 
                 let mut membership =
                     node.membership.lock().await;
 
-                for state in msg.states {
 
-                    if state.address != local_address {
+                match message {
 
-                        let mut peers =
-                            receiver_peers.lock().await;
+                    Message::Gossip(msg) => {
 
-                        peers.insert(
-                            state.address.clone()
-                        );
+                        for state in msg.states {
+
+                                    if state.address != local_address {
+
+                                        let mut peers =
+                                            receiver_peers.lock().await;
+
+                                        peers.insert(
+                                            state.address.clone()
+                                        );
+                                    }
+
+                                    match membership.get_mut(&state.node_id) {
+
+                                        Some(member) => {
+
+                                            if should_update(
+                                                member.heartbeat,
+                                                &member.status,
+                                                state.heartbeat,
+                                                &state.status,
+                                            ) {
+                                                member.heartbeat = state.heartbeat;
+                                                member.status = state.status.clone();
+                                                member.last_seen = Instant::now();
+                                            }
+                                        }
+                                        _ => {
+
+                                            membership.insert(
+                                                state.node_id.clone(),
+                                                Member {
+                                                    node_id: state.node_id.clone(),
+                                                    address: state.address.clone(),
+                                                    heartbeat: state.heartbeat,
+                                                    last_seen: Instant::now(),
+                                                    status: MemberStatus::Alive,
+                                                },
+                                            );                            
+                                        }
+                                    }
+                                }
+
+                                info!(
+                                    "Received gossip from {}",
+                                    addr
+                                );
+
                     }
 
-                    match membership.get_mut(&state.node_id) {
+                    Message::Ping(_) => {
 
-                        Some(member) => {
-
-                            if should_update(
-                                member.heartbeat,
-                                &member.status,
-                                state.heartbeat,
-                                &state.status,
-                            ) {
-                                member.heartbeat = state.heartbeat;
-                                member.status = state.status.clone();
-                                member.last_seen = Instant::now();
-                            }
-                        }
-                        _ => {
-
-                            membership.insert(
-                                state.node_id.clone(),
-                                Member {
-                                    node_id: state.node_id.clone(),
-                                    address: state.address.clone(),
-                                    heartbeat: state.heartbeat,
-                                    last_seen: Instant::now(),
-                                    status: MemberStatus::Alive,
-                                },
-                            );                            
-                        }
                     }
+
+                    Message::Ack(_) => {
+
+                    }
+
                 }
-
-                info!(
-                    "Received gossip from {}",
-                    addr
-                );
             }
         });
     }
@@ -176,9 +194,11 @@ pub async fn start_gossip(node: Node) {
                     .collect::<Vec<_>>()
             };
 
-            let msg = GossipMessage {
-                states
-            };
+            let msg = Message::Gossip(
+                GossipMessage {
+                    states
+                }
+            );
 
             let bytes = serde_json::to_vec(&msg).unwrap();
 
